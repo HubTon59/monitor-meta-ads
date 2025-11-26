@@ -48,7 +48,6 @@ TEXTOS_AJUDA = {
 with st.sidebar:
     st.header(":material/settings: Painel de Controlo")
     
-    # Legenda agora usa as CORES REAIS da tabela
     with st.expander(":material/palette: Legenda de Saúde", expanded=True):
         st.markdown("""
         - 🔵 **Ótima** (Performance Top)
@@ -99,13 +98,7 @@ def carregar_credenciais():
 
 def classificar_campanha(objetivo, ctr, cpm, cpa):
     status, icone = "Normal", "⚪" 
-    
-    # Ícones EMOJI para funcionar dentro da tabela de dados
-    icon_otimo = "🔵" 
-    icon_bom = "🟢"
-    icon_normal = "🟡"
-    icon_ruim = "🟠"
-    icon_critico = "🔴"
+    icon_otimo, icon_bom, icon_normal, icon_ruim, icon_critico = "🔵", "🟢", "🟡", "🟠", "🔴"
 
     if objetivo in ['OUTCOME_TRAFFIC', 'OUTCOME_ENGAGEMENT', 'LINK_CLICKS']:
         if ctr >= 1.5: status, icone = "Ótima", icon_otimo
@@ -130,7 +123,7 @@ def classificar_campanha(objetivo, ctr, cpm, cpa):
     return f"{icone} {status}"
 
 def processar_conta_individual(account_id, periodo_config):
-    """ Processamento isolado """
+    """ Processa campanhas E histórico diário da conta """
     try:
         account = AdAccount(account_id.strip())
         try:
@@ -139,15 +132,14 @@ def processar_conta_individual(account_id, periodo_config):
         except:
             nome_da_conta = f"Conta {account_id}"
 
+        # 1. Buscar Campanhas (Dados Agregados)
         params = {'effective_status': ['ACTIVE'], 'level': 'campaign'}
-        if isinstance(periodo_config, dict):
-            params['time_range'] = periodo_config
-        else:
-            params['date_preset'] = periodo_config
+        if isinstance(periodo_config, dict): params['time_range'] = periodo_config
+        else: params['date_preset'] = periodo_config
 
         fields = ['campaign_name', 'spend', 'impressions', 'clicks', 'cpc', 'ctr', 'reach', 'frequency', 'cpm', 'actions', 'objective']
-        
         insights = account.get_insights(fields=fields, params=params)
+        
         dados_lista = []
         total_gasto = 0.0
         
@@ -183,32 +175,45 @@ def processar_conta_individual(account_id, periodo_config):
                     'CPA': cpa,
                     'Frequência': float(item.get('frequency', 0))
                 })
+
+        # 2. Buscar Histórico Diário da CONTA (Para o Gráfico)
+        # Fazemos uma segunda chamada leve, apenas nível da conta, quebrado por dia
+        params_trend = params.copy()
+        params_trend['time_increment'] = 1 # Isso faz a mágica do dia-a-dia
+        params_trend['level'] = 'account'  # Apenas totais da conta
         
-        return {'id': account_id, 'nome': nome_da_conta, 'df': pd.DataFrame(dados_lista), 'gasto_total': total_gasto}
+        trend_insights = account.get_insights(fields=['spend', 'date_start'], params=params_trend)
+        dados_trend = []
+        if trend_insights:
+            for t in trend_insights:
+                dados_trend.append({
+                    'Data': t['date_start'],
+                    'Gasto': float(t['spend']),
+                    'Conta': nome_da_conta
+                })
+        
+        return {
+            'id': account_id, 
+            'nome': nome_da_conta, 
+            'df': pd.DataFrame(dados_lista), 
+            'df_trend': pd.DataFrame(dados_trend), # Novo DataFrame para o gráfico
+            'gasto_total': total_gasto
+        }
 
     except Exception as e:
-        return {'id': account_id, 'nome': f"Erro: {account_id}", 'df': pd.DataFrame(), 'gasto_total': 0.0}
+        return {'id': account_id, 'nome': f"Erro: {account_id}", 'df': pd.DataFrame(), 'df_trend': pd.DataFrame(), 'gasto_total': 0.0}
 
 @st.cache_data(ttl=300)
 def obter_dados_com_progresso(lista_ids, periodo_api):
-    """ Gerenciador Paralelo com Barra de Progresso """
     resultados = []
-    total = len(lista_ids)
-    
-    # Cria o placeholder da barra
     barra = st.progress(0, text="🚀 A iniciar motores...")
-    
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(processar_conta_individual, cid, periodo_api): cid for cid in lista_ids}
-        
         for i, future in enumerate(as_completed(futures)):
-            # Atualiza a barra à medida que as threads terminam
-            percent = int(((i + 1) / total) * 100)
-            barra.progress(percent, text=f"A carregar conta {i+1}/{total}...")
+            barra.progress(int(((i + 1) / len(lista_ids)) * 100), text=f"A carregar conta {i+1}/{len(lista_ids)}...")
             resultados.append(future.result())
-    
-    time.sleep(0.2) # Pequena pausa para ver o 100%
-    barra.empty() # Remove a barra no final
+    time.sleep(0.2)
+    barra.empty()
     return resultados
 
 # --- LAYOUT PRINCIPAL ---
@@ -243,20 +248,19 @@ st.divider()
 
 # --- PROCESSAMENTO ---
 contas_ids = carregar_credenciais()
-
-# Chama a nova função que tem a barra integrada
 lista_contas = obter_dados_com_progresso(contas_ids, periodo_final_api)
 
-# Ordenação
 if criterio_ordem == "Nome (A-Z)": lista_contas.sort(key=lambda x: x['nome'].lower())
 elif criterio_ordem == "Maior Gasto 💰": lista_contas.sort(key=lambda x: x['gasto_total'], reverse=True)
 
 # --- EXIBIÇÃO ---
 total_tela = 0.0
 contas_exibidas = 0
+lista_trends = [] # Lista para guardar dados do gráfico
 
 for dados in lista_contas:
     df = dados['df']
+    df_trend = dados['df_trend'] # Pegamos o histórico diário
     gasto = dados['gasto_total']
     
     if filtro_visualizacao == "Ocultar Contas Zeradas" and df.empty and gasto == 0: continue
@@ -264,22 +268,16 @@ for dados in lista_contas:
     total_tela += gasto
     contas_exibidas += 1
     
-    # --- LÓGICA DE CORES NO TÍTULO ---
-    # Usamos a sintaxe :cor[texto ou icone] do Streamlit
-    if gasto > 0:
-        # Conta Ativa: Ícone Verde Check
-        icone_visual = ":green[:material/check_circle:]"
-        classe_gasto = f":green[R$ {gasto:.2f}]"
-    else:
-        # Conta Parada: Ícone Cinza Pause
-        icone_visual = ":grey[:material/pause_circle:]"
-        classe_gasto = f":grey[R$ {gasto:.2f}]"
-
-    titulo = f"{icone_visual} **{dados['nome']}** | Investido: {classe_gasto}"
+    # Acumula dados para o gráfico final
+    if not df_trend.empty:
+        lista_trends.append(df_trend)
+    
+    icone_visual = ":green[:material/check_circle:]" if gasto > 0 else ":grey[:material/pause_circle:]"
+    classe_gasto = f":green[R$ {gasto:.2f}]" if gasto > 0 else f":grey[R$ {gasto:.2f}]"
     
     aberto = False if (filtro_visualizacao == "Mostrar Todas as Contas" and gasto == 0) else True
 
-    with st.expander(titulo, expanded=aberto):
+    with st.expander(f"{icone_visual} **{dados['nome']}** | Investido: {classe_gasto}", expanded=aberto):
         if not df.empty:
             cols_base = ['Status', 'Campanha', 'Gasto']
             if objetivo_view == "Visão Geral": cols_extra = ['Objetivo', 'Resultados', 'CPA', 'CTR']
@@ -302,7 +300,34 @@ for dados in lista_contas:
         else:
             st.info("Nenhuma campanha ativa neste período.")
 
-st.markdown("---")
+# --- RODAPÉ E GRÁFICO DE EVOLUÇÃO ---
+st.divider()
+
+# Seletor de Tipo de Gráfico
+if lista_trends:
+    tipo_grafico = st.radio("Visualização Global:", ["Barras (Total Acumulado)", "Linhas (Evolução Diária)"], horizontal=True)
+    
+    if tipo_grafico == "Linhas (Evolução Diária)":
+        st.subheader("📈 Evolução do Investimento (Dia a Dia)")
+        df_geral_trend = pd.concat(lista_trends)
+        # O Streamlit agrupa automaticamente pela cor
+        st.line_chart(df_geral_trend, x="Data", y="Gasto", color="Conta")
+        
+    else:
+        st.subheader("📊 Total por Campanha")
+        # Para o gráfico de barras, precisamos dos dados das campanhas (que estão dentro de 'lista_contas')
+        # Vamos reconstruir um DF rápido só para isso
+        dfs_campanhas = []
+        for d in lista_contas:
+            if not d['df'].empty:
+                temp = d['df'].copy()
+                temp['Conta'] = d['nome']
+                dfs_campanhas.append(temp)
+        
+        if dfs_campanhas:
+            df_final = pd.concat(dfs_campanhas)
+            st.bar_chart(df_final, x="Campanha", y="Gasto", color="Conta")
+
 col_f1, col_f2 = st.columns([3, 1])
 with col_f1:
     st.caption(f"Visualizando {contas_exibidas} contas.")
