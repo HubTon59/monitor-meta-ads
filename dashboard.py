@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import time
+from datetime import datetime
 from dotenv import load_dotenv
 from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.adaccount import AdAccount
@@ -27,35 +28,32 @@ TRADUCAO_OBJETIVOS = {
 }
 
 TEXTOS_AJUDA = {
-    "ctr": "CTR (Taxa de Cliques): Indica se o criativo (imagem/vídeo) está atrativo. Acima de 1% é considerado bom em média.",
-    "cpm": "CPM (Custo por Mil): Quanto custa para aparecer 1.000 vezes. CPM alto indica público caro ou muita concorrência.",
-    "cpa": "CPA/Custo por Res.: Quanto estás a pagar por cada Venda ou Lead. O indicador financeiro mais importante.",
-    "freq": "Frequência: Quantas vezes a mesma pessoa viu o anúncio. Acima de 2.0 pode gerar fadiga (cansaço) no público.",
-    "saude": "Saúde: Classificação automática baseada nas métricas principais (CTR para Tráfego, CPA para Vendas)."
+    "ctr": "CTR (Taxa de Cliques): Indica se o criativo está atrativo. Acima de 1% é bom.",
+    "cpm": "CPM: Custo para aparecer 1.000 vezes.",
+    "cpa": "CPA: Custo por Resultado (Venda/Lead).",
+    "freq": "Frequência: Quantas vezes a mesma pessoa viu o anúncio.",
+    "saude": "Saúde: Classificação automática baseada nas métricas principais."
 }
 
 # --- BARRA LATERAL ---
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
     
-    # Guia de Documentação (Expansível)
-    with st.expander("📘 Guia Rápido (Como ler)", expanded=False):
+    # Guia Atualizado com a cor BRANCA
+    with st.expander("📘 Guia Rápido (Legenda)", expanded=False):
         st.markdown("""
-        **O que significam as cores?**
-        - 🔵 **Ótima:** Supera as expectativas do mercado.
-        - 🟢 **Boa:** Dentro da meta saudável.
-        - 🟡 **Normal:** Atenção, pode melhorar.
-        - 🟠 **Ruim:** Otimizar urgente.
-        - 🔴 **Crítica:** Pausar ou trocar criativo.
-        
-        **Filtros:**
-        Use o menu superior para mudar entre visão de **Vendas**, **Tráfego** ou **Alcance**.
+        **Saúde das Campanhas:**
+        - 🔵 **Ótima:** Supera as expectativas.
+        - 🟢 **Boa:** Dentro da meta.
+        - 🟡 **Normal:** Atenção básica.
+        - 🟠 **Ruim:** Otimizar.
+        - 🔴 **Crítica:** Pausar/Trocar criativo.
+        - ⚪ **Neutro/Sem Conv.:** Campanha ativa mas sem conversões registradas (CPA indefinido) ou métricas insuficientes.
         """)
         
     st.divider()
     
-    modo_tv = st.checkbox("📺 Modo TV (Auto-Refresh)", value=False, help="Se ativo, a página recarrega sozinha a cada 5 minutos.")
-    
+    modo_tv = st.checkbox("📺 Modo TV (Auto-Refresh)", value=False)
     if modo_tv:
         st_autorefresh(interval=5 * 60 * 1000, key="fbrecharge")
         st.caption("🟢 Atualizando a cada 5 min")
@@ -64,8 +62,7 @@ with st.sidebar:
 
     filtro_visualizacao = st.radio(
         "👁️ Filtro de Contas:",
-        ["Ocultar Contas Zeradas", "Mostrar Todas as Contas"],
-        help="Escolha se quer ver contas paradas ou apenas as que estão a gastar hoje."
+        ["Ocultar Contas Zeradas", "Mostrar Todas as Contas"]
     )
     
     st.divider()
@@ -93,7 +90,6 @@ def carregar_credenciais():
 
 def classificar_campanha(objetivo, ctr, cpm, cpa):
     status, cor = "Normal", "⚪"
-    # Lógica simplificada para brevidade (mantém a tua lógica completa anterior aqui se preferires)
     if objetivo in ['OUTCOME_TRAFFIC', 'OUTCOME_ENGAGEMENT', 'LINK_CLICKS']:
         if ctr >= 1.5: status, cor = "Ótima 🚀", "🔵"
         elif ctr >= 1.0: status, cor = "Boa ✅", "🟢"
@@ -116,7 +112,12 @@ def classificar_campanha(objetivo, ctr, cpm, cpa):
     return f"{cor} {status}"
 
 @st.cache_data(ttl=300) 
-def obter_dados_conta(account_id, periodo_api):
+def obter_dados_conta(account_id, periodo_config):
+    """
+    periodo_config pode ser:
+    1. String: 'today', 'last_7d' (Presets)
+    2. Dict: {'since': '2023-01-01', 'until': '2023-01-31'} (Range)
+    """
     try:
         account = AdAccount(account_id.strip())
         try:
@@ -125,7 +126,18 @@ def obter_dados_conta(account_id, periodo_api):
         except:
             nome_da_conta = f"Conta {account_id}"
 
-        params = {'date_preset': periodo_api, 'effective_status': ['ACTIVE'], 'level': 'campaign'}
+        # Configuração base
+        params = {
+            'effective_status': ['ACTIVE'], 
+            'level': 'campaign'
+        }
+
+        # DECISÃO: É Preset ou Custom Range?
+        if isinstance(periodo_config, dict):
+            params['time_range'] = periodo_config
+        else:
+            params['date_preset'] = periodo_config
+
         fields = ['campaign_name', 'spend', 'impressions', 'clicks', 'cpc', 'ctr', 'reach', 'frequency', 'cpm', 'actions', 'objective']
         
         insights = account.get_insights(fields=fields, params=params)
@@ -173,23 +185,56 @@ def obter_dados_conta(account_id, periodo_api):
 # --- LAYOUT PRINCIPAL ---
 st.title("🧠 Monitor Inteligente Meta Ads")
 
-mapa_datas = { "Hoje": "today", "Ontem": "yesterday", "Últimos 7 Dias": "last_7d", "Este Mês": "this_month" }
+# Dicionário de Presets
+presets_datas = { 
+    "Hoje": "today", 
+    "Ontem": "yesterday", 
+    "Últimos 7 Dias": "last_7d", 
+    "Este Mês": "this_month",
+    "Personalizado 📅": "custom" # Nova Opção
+}
+
 c1, c2, c3 = st.columns([2, 1, 1])
 with c1:
-    objetivo_view = st.selectbox("📂 Métricas em Destaque:", ["Visão Geral", "Tráfego", "Alcance", "Conversão"], help="Muda os indicadores principais dos cartões e tabelas.")
+    objetivo_view = st.selectbox("📂 Métricas em Destaque:", ["Visão Geral", "Tráfego", "Alcance", "Conversão"])
 with c2:
-    label_data = st.selectbox("📅 Período:", list(mapa_datas.keys()))
+    label_periodo = st.selectbox("📅 Período:", list(presets_datas.keys()))
+
+# --- LÓGICA DO CALENDÁRIO ---
+periodo_final_api = None
+
+if label_periodo == "Personalizado 📅":
+    # Mostra o calendário
+    datas_sel = st.date_input("Selecione Início e Fim:", [])
+    
+    if len(datas_sel) == 2:
+        inicio, fim = datas_sel
+        # Converte para string YYYY-MM-DD
+        periodo_final_api = {
+            'since': inicio.strftime('%Y-%m-%d'), 
+            'until': fim.strftime('%Y-%m-%d')
+        }
+    else:
+        st.warning("👈 Por favor, selecione uma data de início e fim no calendário.")
+        st.stop() # Para a execução até o usuário escolher as duas datas
+else:
+    periodo_final_api = presets_datas[label_periodo]
+
 with c3:
     criterio_ordem = st.selectbox("🔃 Ordenar:", ["Nome (A-Z)", "Maior Gasto 💰"])
 
 st.divider()
 
+# --- PROCESSAMENTO ---
 contas_ids = carregar_credenciais()
 barra = st.progress(0, text="A buscar dados...")
 lista_contas = []
+
 for i, cid in enumerate(contas_ids):
     barra.progress(int(((i+1)/len(contas_ids))*100))
-    lista_contas.append(obter_dados_conta(cid, mapa_datas[label_data]))
+    # Passa o periodo_final_api (que pode ser string ou dict)
+    lista_contas.append(obter_dados_conta(cid, periodo_final_api))
+    
 barra.empty()
 
 if criterio_ordem == "Nome (A-Z)": lista_contas.sort(key=lambda x: x['nome'].lower())
@@ -212,7 +257,6 @@ for dados in lista_contas:
             elif objetivo_view == "Alcance": cols_extra = ['Impressões', 'CPM', 'Frequência']
             elif objetivo_view == "Conversão": cols_extra = ['Resultados', 'CPA', 'Objetivo']
             
-            # --- TABELA COM TOOLTIPS (HELP) ---
             st.dataframe(
                 df[list(dict.fromkeys(cols_base + cols_extra))],
                 column_config={
