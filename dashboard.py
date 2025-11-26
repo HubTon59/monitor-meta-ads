@@ -11,17 +11,16 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
     page_title="Monitor Pro",
-    page_icon=":material/analytics:", # Ícone elegante na aba do navegador
+    page_icon=":material/analytics:",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- ESTILOS CSS (Refinamento Visual Opcional) ---
+# --- ESTILOS ---
 st.markdown("""
 <style>
     [data-testid="stExpander"] details summary p {
-        font-weight: 600;
-        font-size: 1.1rem;
+        font-size: 1.05rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -49,14 +48,15 @@ TEXTOS_AJUDA = {
 with st.sidebar:
     st.header(":material/settings: Painel de Controlo")
     
-    with st.expander(":material/help: Legenda de Saúde", expanded=False):
+    # Legenda agora usa as CORES REAIS da tabela
+    with st.expander(":material/palette: Legenda de Saúde", expanded=True):
         st.markdown("""
-        - :material/sentiment_very_satisfied: **Ótima**
-        - :material/sentiment_satisfied: **Boa**
-        - :material/sentiment_neutral: **Normal**
-        - :material/sentiment_dissatisfied: **Ruim**
-        - :material/warning: **Crítica**
-        - :material/radio_button_unchecked: **Neutro**
+        - 🔵 **Ótima** (Performance Top)
+        - 🟢 **Boa** (Dentro da Meta)
+        - 🟡 **Normal** (Atenção)
+        - 🟠 **Ruim** (Otimizar)
+        - 🔴 **Crítica** (Pausar/Rever)
+        - ⚪ **Neutro** (Sem dados suf.)
         """)
         
     st.divider()
@@ -98,11 +98,10 @@ def carregar_credenciais():
         st.stop()
 
 def classificar_campanha(objetivo, ctr, cpm, cpa):
-    # Ícones Material para substituir as bolinhas coloridas antigas
     status, icone = "Normal", "⚪" 
     
-    # Definição de ícones baseada em sentimentos/alertas
-    icon_otimo = "🔵" # Mantemos emojis na tabela pois st.dataframe não renderiza :material: dentro da célula ainda
+    # Ícones EMOJI para funcionar dentro da tabela de dados
+    icon_otimo = "🔵" 
     icon_bom = "🟢"
     icon_normal = "🟡"
     icon_ruim = "🟠"
@@ -131,7 +130,7 @@ def classificar_campanha(objetivo, ctr, cpm, cpa):
     return f"{icone} {status}"
 
 def processar_conta_individual(account_id, periodo_config):
-    """ Função isolada para rodar em paralelo """
+    """ Processamento isolado """
     try:
         account = AdAccount(account_id.strip())
         try:
@@ -191,16 +190,25 @@ def processar_conta_individual(account_id, periodo_config):
         return {'id': account_id, 'nome': f"Erro: {account_id}", 'df': pd.DataFrame(), 'gasto_total': 0.0}
 
 @st.cache_data(ttl=300)
-def obter_dados_paralelos(lista_ids, periodo_api):
-    """ Gerenciador de Multithreading """
+def obter_dados_com_progresso(lista_ids, periodo_api):
+    """ Gerenciador Paralelo com Barra de Progresso """
     resultados = []
-    # max_workers=5 é seguro para não levar block da API
+    total = len(lista_ids)
+    
+    # Cria o placeholder da barra
+    barra = st.progress(0, text="🚀 A iniciar motores...")
+    
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(processar_conta_individual, cid, periodo_api): cid for cid in lista_ids}
         
-        for future in as_completed(futures):
+        for i, future in enumerate(as_completed(futures)):
+            # Atualiza a barra à medida que as threads terminam
+            percent = int(((i + 1) / total) * 100)
+            barra.progress(percent, text=f"A carregar conta {i+1}/{total}...")
             resultados.append(future.result())
-            
+    
+    time.sleep(0.2) # Pequena pausa para ver o 100%
+    barra.empty() # Remove a barra no final
     return resultados
 
 # --- LAYOUT PRINCIPAL ---
@@ -233,12 +241,11 @@ with c3:
 
 st.divider()
 
-# --- PROCESSAMENTO PARALELO ---
+# --- PROCESSAMENTO ---
 contas_ids = carregar_credenciais()
 
-# Spinner elegante em vez de barra de progresso lenta
-with st.spinner('🚀 A conectar aos servidores da Meta...'):
-    lista_contas = obter_dados_paralelos(contas_ids, periodo_final_api)
+# Chama a nova função que tem a barra integrada
+lista_contas = obter_dados_com_progresso(contas_ids, periodo_final_api)
 
 # Ordenação
 if criterio_ordem == "Nome (A-Z)": lista_contas.sort(key=lambda x: x['nome'].lower())
@@ -257,9 +264,18 @@ for dados in lista_contas:
     total_tela += gasto
     contas_exibidas += 1
     
-    # Ícone dinâmico no título do expander
-    icone_conta = ":material/check_circle:" if gasto > 0 else ":material/pause_circle:"
-    titulo = f"{icone_conta} {dados['nome']} | Investido: R$ {gasto:.2f}"
+    # --- LÓGICA DE CORES NO TÍTULO ---
+    # Usamos a sintaxe :cor[texto ou icone] do Streamlit
+    if gasto > 0:
+        # Conta Ativa: Ícone Verde Check
+        icone_visual = ":green[:material/check_circle:]"
+        classe_gasto = f":green[R$ {gasto:.2f}]"
+    else:
+        # Conta Parada: Ícone Cinza Pause
+        icone_visual = ":grey[:material/pause_circle:]"
+        classe_gasto = f":grey[R$ {gasto:.2f}]"
+
+    titulo = f"{icone_visual} **{dados['nome']}** | Investido: {classe_gasto}"
     
     aberto = False if (filtro_visualizacao == "Mostrar Todas as Contas" and gasto == 0) else True
 
@@ -286,7 +302,6 @@ for dados in lista_contas:
         else:
             st.info("Nenhuma campanha ativa neste período.")
 
-# Rodapé com métrica global
 st.markdown("---")
 col_f1, col_f2 = st.columns([3, 1])
 with col_f1:
