@@ -5,13 +5,18 @@ import time
 from dotenv import load_dotenv
 from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.adaccount import AdAccount
+from streamlit_autorefresh import st_autorefresh # Nova biblioteca para TV
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
     page_title="Monitor Meta Ads Pro",
-    page_icon="🚀",
+    page_icon="🧠",
     layout="wide"
 )
+
+# --- AUTO-REFRESH (Configuração para TV) ---
+# Atualiza a cada 5 minutos (300.000 milissegundos)
+count = st_autorefresh(interval=5 * 60 * 1000, key="fbrecharge")
 
 # --- FUNÇÕES ---
 def carregar_credenciais():
@@ -32,31 +37,79 @@ def carregar_credenciais():
         st.error(f"❌ Erro ao conectar à API: {e}")
         st.stop()
 
-@st.cache_data(ttl=300) # Cache de 5 min para não ficar lento se clicares apenas nos filtros
+def classificar_campanha(objetivo, ctr, cpm, cpa):
+    """
+    O CÉREBRO DA OPERAÇÃO 🧠
+    Define se a campanha é Boa, Média ou Ruim baseada no objetivo.
+    Nota: Estes valores são genéricos. Podes ajustar conforme o teu nicho.
+    """
+    status = "Normal"
+    cor = "⚪" # Cinza neutro
+
+    # 1. OBJETIVO: TRÁFEGO ou ENGAJAMENTO (Foco no Criativo/CTR)
+    if objetivo in ['OUTCOME_TRAFFIC', 'OUTCOME_ENGAGEMENT', 'LINK_CLICKS', 'POST_ENGAGEMENT']:
+        if ctr >= 1.5:
+            status, cor = "Ótima 🚀", "🔵"
+        elif ctr >= 1.0:
+            status, cor = "Boa ✅", "🟢"
+        elif ctr >= 0.6:
+            status, cor = "Normal 😐", "🟡"
+        elif ctr >= 0.3:
+            status, cor = "Ruim ⚠️", "🟠"
+        else:
+            status, cor = "Péssima 🆘", "🔴"
+
+    # 2. OBJETIVO: VENDAS ou LEADS (Foco no Dinheiro/CPA)
+    elif objetivo in ['OUTCOME_SALES', 'OUTCOME_LEADS', 'CONVERSIONS']:
+        # Aqui é difícil ser genérico, pois depende do ticket do produto.
+        # Vamos assumir que um Lead/Venda barato é bom (ex: < R$ 20.00)
+        if cpa > 0:
+            if cpa <= 10.00:
+                status, cor = "Ótima 🚀", "🔵"
+            elif cpa <= 30.00:
+                status, cor = "Boa ✅", "🟢"
+            elif cpa <= 60.00:
+                status, cor = "Normal 😐", "🟡"
+            elif cpa <= 100.00:
+                status, cor = "Cara ⚠️", "🟠"
+            else:
+                status, cor = "Crítica 🆘", "🔴"
+        else:
+             status, cor = "Sem Conversão 👻", "⚪"
+
+    # 3. OBJETIVO: RECONHECIMENTO (Foco no Custo por Mil/CPM)
+    elif objetivo in ['OUTCOME_AWARENESS', 'BRAND_AWARENESS', 'REACH']:
+        if cpm <= 5.00:
+            status, cor = "Barata 🚀", "🔵"
+        elif cpm <= 10.00:
+            status, cor = "Boa ✅", "🟢"
+        elif cpm <= 20.00:
+            status, cor = "Normal 😐", "🟡"
+        else:
+            status, cor = "Cara 🆘", "🔴"
+    
+    return f"{cor} {status}"
+
+@st.cache_data(ttl=300) 
 def obter_dados_conta(account_id, periodo_api):
-    """
-    Retorna um Dicionário com dados processados para facilitar a ordenação
-    """
     try:
         account = AdAccount(account_id.strip())
-        
-        # 1. Tentar pegar o nome
         try:
             account.api_get(fields=['name'])
             nome_da_conta = account['name']
         except:
             nome_da_conta = f"Conta {account_id}"
 
-        # 2. Filtros
         params = {
             'date_preset': periodo_api,
             'effective_status': ['ACTIVE'], 
             'level': 'campaign'
         }
         
+        # ADICIONEI O CAMPO 'objective' AQUI
         fields = [
             'campaign_name', 'spend', 'impressions', 'clicks', 
-            'cpc', 'ctr', 'reach', 'frequency', 'cpm', 'actions'
+            'cpc', 'ctr', 'reach', 'frequency', 'cpm', 'actions', 'objective'
         ]
         
         insights = account.get_insights(fields=fields, params=params)
@@ -67,7 +120,6 @@ def obter_dados_conta(account_id, periodo_api):
         
         if insights:
             for item in insights:
-                # Processar Resultados
                 acoes = item.get('actions', [])
                 res_campanha = 0
                 if acoes:
@@ -79,22 +131,36 @@ def obter_dados_conta(account_id, periodo_api):
                 total_gasto += gasto
                 total_resultados += res_campanha
                 
+                ctr = float(item.get('ctr', 0) if 'ctr' in item else 0)
+                cpm = float(item.get('cpm', 0) if 'cpm' in item else 0)
+                
+                # Calcular CPA (Custo por Ação) para a saúde
+                cpa = (gasto / res_campanha) if res_campanha > 0 else 0
+                
+                # Objetivo da campanha (Ex: OUTCOME_LEADS)
+                obj_fb = item.get('objective', 'UNKNOWN')
+
+                # Calcular a Saúde
+                saude = classificar_campanha(obj_fb, ctr, cpm, cpa)
+
                 dados_lista.append({
                     'Campanha': item.get('campaign_name'),
+                    'Status': saude, # Nova Coluna
+                    'Objetivo': obj_fb.replace('OUTCOME_', '').title(), # Limpa o nome (ex: Leads)
                     'Gasto': gasto,
                     'Impressões': int(item.get('impressions', 0)),
                     'Alcance': int(item.get('reach', 0)),
                     'Frequência': float(item.get('frequency', 0)),
                     'Cliques': int(item.get('clicks', 0)),
                     'CPC': float(item.get('cpc', 0) if 'cpc' in item else 0),
-                    'CTR': float(item.get('ctr', 0) if 'ctr' in item else 0),
-                    'CPM': float(item.get('cpm', 0) if 'cpm' in item else 0),
-                    'Resultados': res_campanha
+                    'CTR': ctr,
+                    'CPM': cpm,
+                    'Resultados': res_campanha,
+                    'CPA': cpa
                 })
         
         df = pd.DataFrame(dados_lista)
         
-        # Retornamos um objeto completo para permitir ordenação posterior
         return {
             'id': account_id,
             'nome': nome_da_conta,
@@ -105,176 +171,79 @@ def obter_dados_conta(account_id, periodo_api):
         }
 
     except Exception as e:
-        return {
-            'id': account_id,
-            'nome': f"Erro: {account_id}",
-            'df': pd.DataFrame(),
-            'gasto_total': 0.0,
-            'campanhas_ativas': 0,
-            'resultados_total': 0
-        }
+        return {'id': account_id, 'nome': f"Erro: {account_id}", 'df': pd.DataFrame(), 'gasto_total': 0.0, 'campanhas_ativas': 0, 'resultados_total': 0}
 
-# --- INTERFACE PRINCIPAL ---
+# --- INTERFACE ---
+st.title("🧠 Monitor Inteligente (TV Mode)")
 
-st.title("🚀 Monitor Meta Ads Pro")
+# Barra lateral com relógio da última atualização
+with st.sidebar:
+    st.caption(f"Última atualização: {time.strftime('%H:%M:%S')}")
+    if st.button("Forçar Atualização"):
+        st.cache_data.clear()
+        st.rerun()
 
-# --- MENU SUPERIOR (Filtros e Ordenação) ---
-mapa_datas = {
-    "Hoje": "today",
-    "Ontem": "yesterday",
-    "Últimos 7 Dias": "last_7d",
-    "Este Mês": "this_month",
-    "Mês Passado": "last_month",
-    "Máximo": "maximum"
-}
+mapa_datas = { "Hoje": "today", "Ontem": "yesterday", "Últimos 7 Dias": "last_7d", "Este Mês": "this_month", "Máximo": "maximum" }
 
-# Cria 4 colunas para o menu ficar alinhado
-c1, c2, c3, c4 = st.columns([1.5, 1, 1, 0.5])
-
+c1, c2, c3 = st.columns([2, 1, 1])
 with c1:
-    objetivo = st.selectbox(
-        "📂 Foco da Análise:",
-        ["Visão Geral (Financeiro)", "Tráfego & Cliques", "Alcance & Marca", "Conversão & Leads"]
-    )
-
+    objetivo = st.selectbox("📂 Visualizar Métricas de:", ["Visão Geral", "Tráfego", "Alcance", "Conversão"])
 with c2:
     label_data = st.selectbox("📅 Período:", list(mapa_datas.keys()))
-    periodo_api = mapa_datas[label_data]
-
 with c3:
-    # --- NOVO MENU DE ORDENAÇÃO ---
-    criterio_ordem = st.selectbox(
-        "🔃 Ordenar BMs por:",
-        ["Nome (A-Z)", "Maior Investimento 💰", "Menor Investimento 📉", "Qtd. Campanhas 🔥", "Mais Resultados 🎯"]
-    )
-
-with c4:
-    st.write("") # Espaçamento
-    st.write("")
-    if st.button("🔄", type="primary", help="Atualizar Dados"): 
-        st.cache_data.clear() # Limpa cache para forçar atualização real
-        st.rerun()
+    criterio_ordem = st.selectbox("🔃 Ordenar:", ["Nome", "Maior Gasto", "Pior Performance"])
 
 st.divider()
 
-# --- CARREGAMENTO E PROCESSAMENTO ---
+# --- PROCESSAMENTO ---
 contas_ids = carregar_credenciais()
+barra = st.progress(0, text="A analisar campanhas...")
+lista_contas = []
 
-# Barra de progresso visual
-barra_progresso = st.progress(0, text="A iniciar conexão com o Facebook...")
-lista_contas_processadas = []
+for i, cid in enumerate(contas_ids):
+    barra.progress(int(((i+1)/len(contas_ids))*100))
+    lista_contas.append(obter_dados_conta(cid, mapa_datas[label_data]))
 
-# 1. Fetch dos dados (Carregar tudo primeiro)
-for i, conta_id in enumerate(contas_ids):
-    percentual = int(((i + 1) / len(contas_ids)) * 100)
-    barra_progresso.progress(percentual, text=f"A ler conta {i+1} de {len(contas_ids)}...")
-    
-    dados_conta = obter_dados_conta(conta_id, periodo_api)
-    lista_contas_processadas.append(dados_conta)
+barra.empty()
 
-time.sleep(0.5) # Pequena pausa visual
-barra_progresso.empty() # Remove a barra quando termina
-
-# 2. Lógica de Ordenação
-if criterio_ordem == "Nome (A-Z)":
-    lista_contas_processadas.sort(key=lambda x: x['nome'].lower())
-elif criterio_ordem == "Maior Investimento 💰":
-    lista_contas_processadas.sort(key=lambda x: x['gasto_total'], reverse=True)
-elif criterio_ordem == "Menor Investimento 📉":
-    lista_contas_processadas.sort(key=lambda x: x['gasto_total'], reverse=False)
-elif criterio_ordem == "Qtd. Campanhas 🔥":
-    lista_contas_processadas.sort(key=lambda x: x['campanhas_ativas'], reverse=True)
-elif criterio_ordem == "Mais Resultados 🎯":
-    lista_contas_processadas.sort(key=lambda x: x['resultados_total'], reverse=True)
+# Ordenação (Incluindo lógica nova)
+if criterio_ordem == "Nome": lista_contas.sort(key=lambda x: x['nome'].lower())
+elif criterio_ordem == "Maior Gasto": lista_contas.sort(key=lambda x: x['gasto_total'], reverse=True)
 
 # --- EXIBIÇÃO ---
-todos_dados_grafico = []
-total_geral_gasto = 0.0
+total_geral = sum(c['gasto_total'] for c in lista_contas)
+st.metric("Investimento Total na Tela", f"R$ {total_geral:.2f}")
 
-for dados in lista_contas_processadas:
+for dados in lista_contas:
     df = dados['df']
-    nome = dados['nome']
-    gasto = dados['gasto_total']
-    
-    total_geral_gasto += gasto
-    
-    # Prepara dados para o gráfico final
-    if not df.empty:
-        df_graf = df.copy()
-        df_graf['Nome_Conta'] = nome
-        todos_dados_grafico.append(df_graf)
-    
-    # Definição do Expander
-    # Se ordenamos por "Menor Investimento", talvez queiramos ver as zeradas abertas.
-    # Mas por padrão, mantemos a lógica: se gastou > 0, expande.
-    esta_expandido = True if gasto > 0 else False
-    
-    # Ícone dinâmico no título
-    icone = "🟢" if gasto > 0 else "⚪"
-    titulo = f"{icone} {nome} | Gasto: R$ {gasto:.2f} | Campanhas: {dados['campanhas_ativas']}"
-    
-    with st.expander(titulo, expanded=esta_expandido):
-        if df.empty:
-            st.info(f"Sem campanhas ativas neste período ({label_data}).")
-        else:
-            # Colunas de métricas
-            c1, c2, c3, c4 = st.columns(4)
+    if df.empty and dados['gasto_total'] == 0: continue # Pula contas vazias para economizar espaço na TV
+
+    with st.expander(f"🏢 {dados['nome']} | R$ {dados['gasto_total']:.2f}", expanded=True):
+        if not df.empty:
+            # Seleção de colunas baseada no objetivo visual
+            cols_base = ['Status', 'Campanha', 'Gasto']
             
-            if objetivo == "Visão Geral (Financeiro)":
-                c1.metric("Investido", f"R$ {gasto:.2f}")
-                c2.metric("Impressões", f"{df['Impressões'].sum():,}".replace(',', '.'))
-                c3.metric("CPM", f"R$ {df['CPM'].mean():.2f}")
-                c4.metric("Cliques", f"{df['Cliques'].sum()}")
-                cols = ['Campanha', 'Gasto', 'Impressões', 'CPM', 'Cliques']
-
-            elif objetivo == "Tráfego & Cliques":
-                c1.metric("Cliques", f"{df['Cliques'].sum()}")
-                c2.metric("CTR", f"{df['CTR'].mean():.2f}%")
-                c3.metric("CPC", f"R$ {df['CPC'].mean():.2f}")
-                c4.metric("Investido", f"R$ {gasto:.2f}")
-                cols = ['Campanha', 'Cliques', 'CTR', 'CPC', 'Gasto']
-
-            elif objetivo == "Alcance & Marca":
-                c1.metric("Alcance", f"{df['Alcance'].sum():,}".replace(',', '.'))
-                c2.metric("Freq.", f"{df['Frequência'].mean():.2f}")
-                c3.metric("CPM", f"R$ {df['CPM'].mean():.2f}")
-                c4.metric("Impr.", f"{df['Impressões'].sum():,}".replace(',', '.'))
-                cols = ['Campanha', 'Alcance', 'Frequência', 'CPM', 'Impressões']
-
-            elif objetivo == "Conversão & Leads":
-                res = dados['resultados_total']
-                cpa = (gasto / res) if res > 0 else 0
-                c1.metric("Resultados", f"{res}")
-                c2.metric("Custo/Res.", f"R$ {cpa:.2f}")
-                c3.metric("Investido", f"R$ {gasto:.2f}")
-                c4.metric("CPC", f"R$ {df['CPC'].mean():.2f}")
-                cols = ['Campanha', 'Resultados', 'Gasto', 'CPC']
-
-            # Tabela com Formatação de Moeda
+            if objetivo == "Visão Geral":
+                cols_extra = ['Objetivo', 'Resultados', 'CPA', 'CTR']
+            elif objetivo == "Tráfego":
+                cols_extra = ['Cliques', 'CTR', 'CPC']
+            elif objetivo == "Alcance":
+                cols_extra = ['Impressões', 'CPM', 'Frequência']
+            elif objetivo == "Conversão":
+                cols_extra = ['Resultados', 'CPA', 'Objetivo']
+            
+            cols_finais = cols_base + cols_extra
+            
+            # Tabela
             st.dataframe(
-                df[cols].style.background_gradient(subset=[cols[1]], cmap='Reds'),
+                df[cols_finais],
                 column_config={
                     "Gasto": st.column_config.NumberColumn(format="R$ %.2f"),
-                    "CPC": st.column_config.NumberColumn(format="R$ %.2f"),
+                    "CPA": st.column_config.NumberColumn(format="R$ %.2f", label="Custo/Res."),
                     "CPM": st.column_config.NumberColumn(format="R$ %.2f"),
-                    "Custo/Res.": st.column_config.NumberColumn(format="R$ %.2f"),
+                    "CPC": st.column_config.NumberColumn(format="R$ %.2f"),
                     "CTR": st.column_config.NumberColumn(format="%.2f%%"),
-                    "Frequência": st.column_config.NumberColumn(format="%.2f"),
+                    "Status": st.column_config.TextColumn(label="Saúde"),
                 },
                 hide_index=True
             )
-
-# --- SIDEBAR & GRÁFICO FINAL ---
-with st.sidebar:
-    st.header("📊 Resumo Global")
-    st.write(f"**Ordenado por:** {criterio_ordem}")
-    st.metric("Total Investido", f"R$ {total_geral_gasto:.2f}")
-    if todos_dados_grafico:
-        contas_ativas = len([c for c in lista_contas_processadas if c['gasto_total'] > 0])
-        st.write(f"Contas Ativas: **{contas_ativas}**/{len(lista_contas_processadas)}")
-
-if todos_dados_grafico:
-    st.divider()
-    st.subheader(f"🏆 Top Investimentos ({label_data})")
-    df_geral = pd.concat(todos_dados_grafico)
-    st.bar_chart(df_geral, x="Campanha", y="Gasto", color="Nome_Conta")
