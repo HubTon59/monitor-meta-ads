@@ -32,7 +32,7 @@ presets_datas = {
 
 c1, c2, c3 = st.columns([2, 1, 1])
 with c1:
-    st.markdown("Visualize as artes em **alta resolução** das campanhas ativas no período selecionado.")
+    st.markdown("Visualize as artes em das campanhas ativas no período selecionado.")
 with c2:
     label_periodo = st.selectbox("📅 Período de Análise:", list(presets_datas.keys()))
 with c3:
